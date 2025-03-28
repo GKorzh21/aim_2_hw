@@ -5,6 +5,9 @@ import lightgbm as lgb, catboost as cb, xgboost as xgb
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 import plotly.express as px
+import polars as pl
+from itertools import combinations
+
 
 
 def pretty_print(iterable, container='list', max_symbols=100, as_strings=None, return_result=False, prefix='', suffix=''):
@@ -574,3 +577,63 @@ def filter_users_by_99_percentile(df, user_id_col='user_id', target_col='target'
     filtered_df = df[df[user_id_col].isin(filtered_users)]
     
     return filtered_df
+
+
+# Функция для создания полиномиальных фичей с исправлением
+def add_polynomial_features_pl(df, features, degree=2):
+    """
+    Добавляет полиномиальные комбинации фичей до указанной степени
+    """
+    # Создаем копию датафрейма для модификации
+    result_df = df.clone()
+    
+    # Создаем все комбинации фичей для полиномов
+    for feat1, feat2 in combinations(features, 2):
+        # Умножение фичей (взаимодействие)
+        result_df = result_df.with_columns(
+            (pl.col(feat1) * pl.col(feat2)).alias(f'{feat1}_x_{feat2}')
+        )
+        
+        # Можно добавить другие степени при необходимости
+        if degree > 2:
+            result_df = result_df.with_columns(
+                (pl.col(feat1)**2 * pl.col(feat2)).alias(f'{feat1}^2_x_{feat2}'),
+                (pl.col(feat1) * pl.col(feat2)**2).alias(f'{feat1}_x_{feat2}^2')
+            )
+    
+    # Добавляем квадраты фичей
+    for feat in features:
+        result_df = result_df.with_columns(
+            (pl.col(feat)**2).alias(f'{feat}^2')
+        )
+        if degree > 2:
+            result_df = result_df.with_columns((pl.col(feat)**3).alias(f'{feat}^3'))
+    
+    return result_df
+
+
+def add_polynomial_features_pd(df, features, degree=2):
+    """
+    Добавляет полиномиальные комбинации фичей до указанной степени
+    для pandas DataFrame
+    """
+    # Создаем копию датафрейма для модификации
+    result_df = df.copy()
+    
+    # Создаем все комбинации фичей для полиномов
+    for feat1, feat2 in combinations(features, 2):
+        # Умножение фичей (взаимодействие)
+        result_df[f'{feat1}_x_{feat2}'] = result_df[feat1] * result_df[feat2]
+        
+        # Добавляем степени выше 2-й
+        if degree > 2:
+            result_df[f'{feat1}^2_x_{feat2}'] = result_df[feat1]**2 * result_df[feat2]
+            result_df[f'{feat1}_x_{feat2}^2'] = result_df[feat1] * result_df[feat2]**2
+    
+    # Добавляем квадраты и кубы фичей
+    for feat in features:
+        result_df[f'{feat}^2'] = result_df[feat]**2
+        if degree > 2:
+            result_df[f'{feat}^3'] = result_df[feat]**3
+    
+    return result_df
