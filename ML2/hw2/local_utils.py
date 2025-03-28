@@ -141,7 +141,7 @@ def plot_lgbm_importance(model, features, importance_type='split', top_k=20, skl
         
     idx = np.argsort(imps)
     sorted_imps = imps[idx][::-1][:top_k][::-1]
-    sorted_features = features[idx][::-1][:top_k][::-1]
+    sorted_features = np.array(features)[idx][::-1][:top_k][::-1]
     if round_to == 0:
         sorted_imps = sorted_imps.astype(int)
     else:
@@ -482,3 +482,95 @@ def get_df_info_new(df: pd.DataFrame, /, thr=0.5, *args, **kwargs) -> pd.DataFra
     result_df = pd.DataFrame(result_dict, index=columns).sort_values("trash_score", key=lambda x: -np.float_(x))
     
     return result_df
+
+N_UNIQUE_THRESHOLD = 55
+
+def get_categorical_features(df, nunique_threshold=N_UNIQUE_THRESHOLD):
+    return [feature for feature in df.columns 
+            if df[feature].nunique() < nunique_threshold]
+
+def get_numerical_features(df, nunique_threshold=N_UNIQUE_THRESHOLD):
+    return [feature for feature in df.select_dtypes(include=[np.number]).columns 
+            if df[feature].nunique() >= nunique_threshold]
+
+def build_my_info_table(df, nunique_threshold=N_UNIQUE_THRESHOLD):
+    # Check for an empty DataFrame
+    if df is None or df.empty:
+        return None
+    # Convert boolean columns to integer inplace
+    boolean_columns = df.select_dtypes(include='bool').columns
+    df[boolean_columns] = df[boolean_columns].astype(int)
+    # Select numerical columns
+    numerical_features = get_numerical_features(df)
+    # Initialize list to store feature-wise metrics
+    metrics = []
+    for idx, col in enumerate(df.columns):
+        column_data = df[col]
+        dtype   = column_data.dtypes
+        count   = column_data.count()
+        mean    = column_data.mean()   if col in numerical_features else ''
+        std     = column_data.std()    if col in numerical_features else ''
+        min_val = column_data.min()    if col in numerical_features else ''
+        q25     = column_data.quantile(0.25) if col in numerical_features else ''
+        median  = column_data.median() if col in numerical_features else ''
+        q75     = column_data.quantile(0.75) if col in numerical_features else ''
+        q95     = column_data.quantile(0.95) if col in numerical_features else ''
+        max_val = column_data.max()    if col in numerical_features else ''
+        iqr     = max_val - min_val    if col in numerical_features else ''
+        nunique = column_data.nunique()
+        unique_values   = column_data.unique() if nunique < nunique_threshold else ''
+        mode    = column_data.mode().iloc[0] if not column_data.mode().empty else ''
+        mode_count      = column_data.value_counts().max() \
+                                             if not column_data.value_counts().empty else ''
+        mode_percentage = (round(mode_count * 100 / len(column_data), 1) 
+                                             if mode_count not in ['', None] else '')
+        null_count      = column_data.isnull().sum()
+        null_percentage = round(column_data.isnull().mean() * 100, 1)
+        # Append the calculated metrics to the list
+        metrics.append({
+            "#": idx,
+            "column": col,
+            "dtype": dtype,
+            "count": count,
+            "mean": round(mean, 1)   if mean    not in ['', None] else '',
+            "std": round(std, 1)     if std     not in ['', None] else '',
+            "min": round(min_val, 1) if min_val not in ['', None] else '',
+            "25%": round(q25, 1)     if q25     not in ['', None] else '',
+            "50%": round(median, 1)  if median  not in ['', None] else '',
+            "75%": round(q75, 1)     if q75     not in ['', None] else '',
+            "95%": round(q95, 1)     if q95     not in ['', None] else '',
+            "max": round(max_val, 1) if max_val not in ['', None] else '',
+            "IQR": round(iqr, 1)     if iqr     not in ['', None] else '',
+            "nunique": nunique,
+            "unique": unique_values,
+            "mode": mode,
+            "mode #": mode_count,
+            "mode %": mode_percentage,
+            "null #": null_count,
+            "null %": null_percentage,
+        })
+    # Convert metrics list to DataFrame
+    df_info = pd.DataFrame(metrics)
+    # Ensure sorting by dtype is stable
+    df_info = df_info.sort_values(by='dtype').reset_index(drop=True)
+    return df_info
+
+def filter_users_by_99_percentile(df, user_id_col='user_id', target_col='target'):
+    # Колонки, которые НЕ будем учитывать при фильтрации:
+    # 1. user_id и target
+    # 2. Колонки, начинающиеся с "days"
+    exclude_cols = [user_id_col, target_col] + [col for col in df.columns if col.startswith('days')]
+    
+    # Вычисляем 99-й персентиль только для оставшихся колонок
+    percentile_99 = df.drop(columns=exclude_cols).quantile(0.99)
+    
+    # Маска: True, если ВСЕ значения в строке <= 99% персентиля
+    mask = (df.drop(columns=exclude_cols) <= percentile_99).all(axis=1)
+    
+    # Возвращаем только подходящие user_id
+    filtered_users = df.loc[mask, user_id_col]
+    
+    # Фильтруем исходный датафрейм
+    filtered_df = df[df[user_id_col].isin(filtered_users)]
+    
+    return filtered_df
