@@ -7,7 +7,8 @@ from sklearn.preprocessing import StandardScaler
 import plotly.express as px
 import polars as pl
 from itertools import combinations
-
+from sklearn.neighbors import NearestNeighbors
+from sklearn.cluster import KMeans
 
 
 def pretty_print(iterable, container='list', max_symbols=100, as_strings=None, return_result=False, prefix='', suffix=''):
@@ -637,3 +638,196 @@ def add_polynomial_features_pd(df, features, degree=2):
             result_df[f'{feat}^3'] = result_df[feat]**3
     
     return result_df
+
+import pandas as pd
+import plotly.express as px
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.decomposition import PCA
+from sklearn.mixture import GaussianMixture
+from sklearn.cluster import SpectralClustering
+from sklearn.manifold import TSNE
+
+
+def cluster_search_queries(
+    data: pd.DataFrame,
+    text_column: str = "search_query",
+    sample_size: int = 10_000,
+    algorithm: str = "gmm",
+    dim_reduction: str = "pca",
+    n_clusters: int = 10,
+    random_state: int = 42,
+    plot: bool = True,
+) -> pd.DataFrame:
+    """
+    Кластеризует текстовые запросы и визуализирует результат.
+    
+    Параметры:
+    ----------
+    data : pd.DataFrame
+        DataFrame с текстовыми данными.
+    text_column : str, optional
+        Название колонки с текстом (по умолчанию "search_query").
+    sample_size : int, optional
+        Сколько строк брать (если None — берутся все).
+    algorithm : str, optional
+        Алгоритм кластеризации ("gmm" или "spectral").
+    dim_reduction : str, optional
+        Метод уменьшения размерности ("pca" или "tsne").
+    n_clusters : int, optional
+        Количество кластеров.
+    random_state : int, optional
+        Seed для воспроизводимости.
+    plot : bool, optional
+        Строить ли график (по умолчанию True).
+    
+    Возвращает:
+    ----------
+    pd.DataFrame
+        Исходный DataFrame с добавленной колонкой 'cluster'.
+    """
+    
+    # Подготовка данных (удаление NaN и выборка)
+    df = data.dropna(subset=[text_column])
+    if sample_size and len(df) > sample_size:
+        df = df.sample(n=sample_size, random_state=random_state)
+    
+    # Векторизация текста (TF-IDF)
+    vectorizer = TfidfVectorizer(
+        max_features=10_000,
+        stop_words='english',
+        ngram_range=(1, 2)
+    )
+    X = vectorizer.fit_transform(df[text_column])
+    
+    # Уменьшение размерности
+    if dim_reduction == "pca":
+        X_reduced = PCA(n_components=2, random_state=random_state).fit_transform(X.toarray())
+    elif dim_reduction == "tsne":
+        X_reduced = TSNE(n_components=2, perplexity=30, random_state=random_state).fit_transform(X.toarray())
+    else:
+        raise ValueError("Допустимые методы уменьшения размерности: 'pca' или 'tsne'")
+    
+    # Кластеризация
+    if algorithm == "gmm":
+        model = GaussianMixture(
+            n_components=n_clusters,
+            covariance_type='full',
+            random_state=random_state
+        )
+        df['cluster'] = model.fit_predict(X_reduced)
+    elif algorithm == "spectral":
+        model = SpectralClustering(
+            n_clusters=n_clusters,
+            affinity='nearest_neighbors',
+            n_neighbors=10,
+            random_state=random_state
+        )
+        df['cluster'] = model.fit_predict(X_reduced)
+    else:
+        raise ValueError("Допустимые алгоритмы: 'gmm' или 'spectral'")
+    
+    # Визуализация (если нужно)
+    if plot:
+        fig = px.scatter(
+            df,
+            x=X_reduced[:, 0],
+            y=X_reduced[:, 1],
+            color='cluster',
+            hover_data=[text_column],
+            title=f'Кластеризация ({algorithm.upper()} + {dim_reduction.upper()})',
+            width=1200,
+            height=800
+        )
+        fig.update_traces(
+            marker=dict(size=4, opacity=0.7, line=dict(width=0.2)),
+            selector=dict(mode='markers')
+        )
+        fig.update_layout(
+            hoverlabel=dict(bgcolor="white", font_size=12),
+            plot_bgcolor='rgba(240,240,240,0.9)'
+        )
+        fig.show()
+
+def add_knn_features(train, test, features, target, n_neighbors=5):
+    train_filled = train.copy()
+    test_filled = test.copy()
+    
+    # Определяем колонки для заполнения (кроме target и user_id)
+    cols_to_fill = [col for col in features if col not in ['user_id', 'target']]
+    
+    # Функция для умного заполнения
+    def smart_fill(df):
+        # Заполняем пропуски в строках, где есть num_products_to_cart
+        mask = df['num_products_click'].notna()
+        
+        # Для числовых колонок
+        num_cols = [col for col in cols_to_fill if df[col].dtype in ['int64', 'float64']]
+        df.loc[mask, num_cols] = df.loc[mask, num_cols].fillna({
+            # Для счетчиков - 0
+            **{col: 0 for col in num_cols if 'num_' in col},
+            # Для цен - медиана
+            **{col: df[col].median() for col in num_cols if 'price' in col},
+            # Для дней - максимальное значение + 1 (как "очень давно")
+            **{col: df[col].max() + 1 for col in num_cols if 'days_' in col}
+        })
+        
+        # Для временных меток - заполняем минимальной датой
+        time_cols = [col for col in cols_to_fill if 'time' in col]
+        min_date = pd.to_datetime('2024-01-01')  # Очень старая дата
+        df.loc[mask, time_cols] = df.loc[mask, time_cols].fillna(min_date)
+        
+        return df
+    
+    # Применяем умное заполнение
+    train_filled = smart_fill(train_filled)
+    test_filled = smart_fill(test_filled)
+
+    display(train_filled)
+    
+    # Добавляем метки полных строк (после заполнения)
+    train_filled['_complete_row'] = ~train_filled[features].isna().any(axis=1)
+    test_filled['_complete_row'] = ~test_filled[features].isna().any(axis=1)
+    
+    print(f"Тренировочных строк без пропусков: {train_filled['_complete_row'].sum()}/{len(train_filled)}")
+    print(f"Тестовых строк без пропусков: {test_filled['_complete_row'].sum()}/{len(test_filled)}")
+    
+    # Обучаем KNN только на полных строках
+    knn = NearestNeighbors(n_neighbors=n_neighbors)
+    knn.fit(train_filled.loc[train_filled['_complete_row'], features])
+    
+    def get_stats(X, X_filled):
+        # Инициализируем результат с -1
+        stats = pd.DataFrame({
+            'knn_mean_target': -1,
+            'knn_std_target': -1,
+            'knn_median_dist': -1,
+            'knn_min_dist': -1,
+            'knn_max_dist': -1
+        }, index=X.index)
+        
+        # Вычисляем статистики только для полных строк
+        complete_rows = X_filled['_complete_row']
+        if complete_rows.any():
+            distances, indices = knn.kneighbors(X.loc[complete_rows, features])
+            
+            stats.loc[complete_rows, 'knn_mean_target'] = train.iloc[indices.flatten()][target].values.reshape(indices.shape).mean(axis=1)
+            stats.loc[complete_rows, 'knn_std_target'] = train.iloc[indices.flatten()][target].values.reshape(indices.shape).std(axis=1)
+            stats.loc[complete_rows, 'knn_median_dist'] = np.median(distances, axis=1)
+            stats.loc[complete_rows, 'knn_min_dist'] = np.min(distances, axis=1)
+            stats.loc[complete_rows, 'knn_max_dist'] = np.max(distances, axis=1)
+        
+        return stats
+    
+    # Добавляем статистики
+    train_stats = get_stats(train_filled, train_filled)
+    test_stats = get_stats(test_filled, test_filled)
+    
+    # Объединяем с исходными данными
+    train_result = pd.concat([train_filled, train_stats], axis=1)
+    test_result = pd.concat([test_filled, test_stats], axis=1)
+    
+    # Удаляем временные колонки
+    train_result.drop(columns=['_complete_row'], inplace=True)
+    test_result.drop(columns=['_complete_row'], inplace=True)
+    
+    return train_result, test_result
