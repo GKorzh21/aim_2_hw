@@ -590,7 +590,7 @@ def add_polynomial_features_pl(df, features, degree=2):
     
     # Создаем все комбинации фичей для полиномов
     for feat1, feat2 in combinations(features, 2):
-        # Умножение фичей (взаимодействие)
+        # Умно * pl.col(жение фичей (взаимодействие)
         result_df = result_df.with_columns(
             (pl.col(feat1) * pl.col(feat2)).alias(f'{feat1}_x_{feat2}')
         )
@@ -831,7 +831,7 @@ import pandas as pd
 import faiss
 from sklearn.preprocessing import StandardScaler
 
-def add_knn_features_faiss(df_pd, features, target, n_neighbors=5, use_gpu=True):
+def add_knn_features_faiss(df_pd, features, n_neighbors=5, use_gpu=True):
     df = df_pd.copy()
     
     # Заполнение пропусков
@@ -884,583 +884,12 @@ def add_knn_features_faiss(df_pd, features, target, n_neighbors=5, use_gpu=True)
         knn_features[f'knn_{feature}_sum'] = knn_values.sum(axis=1)
         knn_features[f'knn_{feature}_range'] = knn_features[f'knn_{feature}_max'] - knn_features[f'knn_{feature}_min']
     
-    if target is not None:
-        target_neighbors = df[target].values[indices]
-        df['knn_target_mean'] = target_neighbors.mean(axis=1)
-        df['knn_target_std'] = target_neighbors.std(axis=1)
-        df['knn_target_median'] = np.median(target_neighbors, axis=1)
-        df['knn_target_sum'] = target_neighbors.sum(axis=1)
-        df['knn_target_range'] = df['knn_target_mean'] - target_neighbors.min(axis=1)
-    
     # Добавляем новые признаки в DataFrame
     for key, value in knn_features.items():
         df[key] = value
     
     print('KNN features created')
     return df
-
-
-import polars as pl
-import pandas as pd
-import numpy as np
-from datetime import date, timedelta
-from sklearn.decomposition import TruncatedSVD
-
-import polars as pl
-import pandas as pd
-import numpy as np
-from datetime import date, timedelta
-from sklearn.decomposition import TruncatedSVD
-from itertools import combinations
-
-def old_generate_features(actions_history, search_history, product_info, widget_info, end_date, prediction_date):
-
-    """
-    Генерация расширенных признаков с учётом полной структуры данных
-    
-    Параметры:
-        actions_history: DataFrame с историей действий
-        search_history: DataFrame с историей поиска
-        product_info: DataFrame с информацией о товарах
-        widget_info: DataFrame с информацией о виджетах
-        end_date: Дата окончания периода для генерации признаков
-        prediction_date: Дата, относительно которой считаются временные признаки
-    """
-    # 1. Convert all inputs to Polars DataFrames if they aren't already
-    actions_history = pl.DataFrame(actions_history)
-    search_history = pl.DataFrame(search_history)
-    product_info = pl.DataFrame(product_info)
-    widget_info = pl.DataFrame(widget_info)
-    
-    # 2. Verify column names exist before processing
-    required_columns = {
-        'actions_history': ['user_id', 'action_type_id', 'product_id', 'timestamp', 'page_product_id', 'widget_name_id'],
-        'search_history': ['user_id', 'search_query', 'timestamp', 'widget_name_id'],
-        'product_info': ['product_id', 'discount_price', 'price', 'category_id', 'brand'],
-        'widget_info': ['widget_name_id', 'widget_name']
-    }
-    
-    for df_name, cols in required_columns.items():
-        df = locals()[df_name]
-        missing = [col for col in cols if col not in df.columns]
-        if missing:
-            raise ValueError(f"Missing columns in {df_name}: {missing}")
-
-    # Rest of your function remains the same...
-    widget_names = widget_info.to_pandas().set_index('widget_name_id')['widget_name'].to_dict()
-    product_info = product_info.with_columns(
-        discount_percent=(1 - pl.col('discount_price')/pl.col('price')).fill_nan(0)
-    )
-    
-    # Основные агрегации
-    actions = actions_history.filter(pl.col('timestamp').dt.date() <= end_date)
-    searches = search_history.filter(pl.col('timestamp').dt.date() <= end_date)
-    
-    # 1. Базовые агрегации по действиям
-    action_features = []
-    action_types = {
-        1: "click",
-        2: "favorite",
-        3: "order",
-        5: "to_cart"
-    }
-    
-    for action_id, action_name in action_types.items():
-        action_data = actions.filter(pl.col('action_type_id') == action_id)
-        
-        # Агрегации по товарам
-        product_aggs = (
-            action_data
-            .join(product_info, on='product_id')
-            .group_by('user_id')
-            .agg(
-                # Количественные метрики
-                pl.count().alias(f'{action_name}_count'),
-                pl.n_unique('product_id').alias(f'{action_name}_unique_products'),
-                pl.sum('discount_price').alias(f'{action_name}_total_value'),
-                pl.mean('discount_price').alias(f'{action_name}_avg_value'),
-                
-                # Временные метрики
-                (pl.lit(prediction_date) - pl.col('timestamp').dt.date()).dt.total_days().alias(f'days_since_last_{action_name}'),
-                (pl.lit(prediction_date) - pl.col('timestamp').dt.date()).dt.total_days().alias(f'days_since_first_{action_name}'),
-                
-                # Метрики по скидкам
-                pl.mean('discount_percent').alias(f'{action_name}_avg_discount'),
-                pl.max('discount_percent').alias(f'{action_name}_max_discount'),
-                
-                # Особые метрики для заказов
-                *([
-                    pl.median('price').alias(f'{action_name}_median_price'),
-                    (pl.col('discount_price')/pl.col('price')).mean().alias(f'{action_name}_discount_ratio'),
-                ] if action_id == 3 else [])
-            )
-        )
-
-        
-        # Агрегации по виджетам
-        all_users = actions.select('user_id').unique()
-        
-        # Get counts per widget per user
-        widget_counts = (
-            action_data
-            .group_by(['user_id', 'widget_name_id'])
-            .agg(pl.count().alias('count'))
-        )
-        
-        # Get all widget IDs from widget_info
-        all_widget_ids = widget_info['widget_name_id'].unique().to_list()
-        
-        # Create a DataFrame with all possible combinations
-        # This ensures we have all widgets for all users
-        full_grid = (
-            all_users
-            .join(
-                pl.DataFrame({'widget_name_id': all_widget_ids}),
-                how='cross'
-            )
-        )
-        
-        # Left join with our counts
-        widget_aggs = (
-            full_grid
-            .join(
-                widget_counts,
-                on=['user_id', 'widget_name_id'],
-                how='left'
-            )
-            .fill_null(0)
-            .pivot(
-                index='user_id',
-                columns='widget_name_id',
-                values='count',
-                aggregate_function='first'  # Since we already aggregated
-            )
-            .rename({
-                str(wid): f'{action_name}_widget_{widget_names.get(wid, wid)}'
-                for wid in all_widget_ids
-            })
-        )
-        
-        action_features.extend([product_aggs, widget_aggs])
-    
-    # 2. Особые признаки для заказов (покупок)
-    order_features = (
-        actions
-        .filter(pl.col('action_type_id') == 3)
-        .join(product_info, on='product_id')
-        .group_by('user_id')
-        .agg(
-            # Повторные покупки
-            (pl.count() - pl.n_unique('product_id')).alias('repeat_orders'),
-            
-            # Разнообразие категорий
-            pl.n_unique('category_id').alias('unique_categories'),
-            pl.n_unique('brand').alias('unique_brands'),
-            
-            # Статистики по времени между заказами
-            pl.col('timestamp').diff().dt.hours().mean().alias('avg_hours_between_orders'),
-            
-            # RFM метрики
-            (pl.lit(prediction_date) - pl.col('timestamp').dt.date()).dt.total_days().alias('recency'),
-            pl.count().alias('frequency'),
-            pl.sum('discount_price').alias('monetary'),
-        )
-        .with_columns(
-            (pl.col('recency') * 0.4 + pl.col('frequency') * 0.3 + pl.col('monetary') * 0.3).alias('rfm_score')
-        )
-    )
-    action_features.append(order_features)
-    
-    # 3. Признаки из поиска
-    search_features = [
-        searches
-        .group_by('user_id')
-        .agg(
-            pl.count().alias('total_searches'),
-            pl.n_unique('search_query').alias('unique_searches'),
-            (prediction_date - pl.col('timestamp').max().dt.date()).dt.days().alias('days_since_last_search'),
-        ),
-        
-        searches
-        .group_by(['user_id', 'widget_name_id'])
-        .agg(pl.count().alias('count'))
-        .pivot(index='user_id', columns='widget_name_id', values='count', aggregate_function='sum')
-        .rename({str(k): f'search_widget_{v}' for k, v in widget_names.items()})
-        .fill_null(0)
-    ]
-    
-    # 4. Взаимодействия товаров (через page_product_id)
-    interaction_features = (
-        actions
-        .filter(pl.col('page_product_id').is_not_null())
-        .join(product_info.select(['product_id', 'category_id']), on='product_id')
-        .join(
-            product_info.select(['product_id', 'category_id']).rename({'product_id': 'page_product_id', 'category_id': 'page_category_id'}),
-            on='page_product_id'
-        )
-        .group_by('user_id')
-        .agg(
-            # Сколько раз смотрели товары из той же категории
-            (pl.col('category_id') == pl.col('page_category_id')).sum().alias('same_category_interactions'),
-            
-            # Среднее количество взаимодействий на товар
-            pl.count() / pl.n_unique('page_product_id').alias('avg_interactions_per_product'),
-        )
-    )
-    action_features.append(interaction_features)
-    
-    # 5. Временные паттерны
-    time_features = (
-        actions
-        .group_by('user_id')
-        .agg(
-            pl.col('timestamp').dt.hour().mode().first().alias('most_active_hour'),
-            pl.col('timestamp').dt.weekday().mode().first().alias('most_active_weekday'),
-            
-            # Активность в разные периоды
-            (pl.col('timestamp').dt.date() >= (end_date - timedelta(days=7))).sum().alias('actions_last_7d'),
-            (pl.col('timestamp').dt.date() >= (end_date - timedelta(days=30))).sum().alias('actions_last_30d'),
-            
-            # Соотношение активности
-            (pl.col('timestamp').dt.date() >= (end_date - timedelta(days=7))).sum() / 
-            (pl.col('timestamp').dt.date() >= (end_date - timedelta(days=30))).sum().alias('recent_activity_ratio')
-        )
-    )
-    action_features.append(time_features)
-    
-    # 6. SVD разложение для товаров (user-item матрица)
-    user_item_matrix = (
-        actions
-        .filter(pl.col('action_type_id') == 3)
-        .group_by(['user_id', 'product_id'])
-        .agg(pl.count().alias('count'))
-        .pivot(index='user_id', columns='product_id', values='count', aggregate_function='sum')
-        .fill_null(0)
-    )
-    
-    svd = TruncatedSVD(n_components=5, random_state=42)
-    svd_features = svd.fit_transform(user_item_matrix.drop('user_id').to_pandas())
-    
-    svd_df = pl.DataFrame({
-        'user_id': user_item_matrix['user_id'],
-        **{f'svd_{i+1}': svd_features[:, i] for i in range(5)}
-    })
-    action_features.append(svd_df)
-    
-    # Собираем все признаки вместе
-    features = action_features[0]
-    for df in action_features[1:] + search_features:
-        features = features.join(df, on='user_id', how='left')
-    
-    # Заполняем пропуски
-    features = features.fill_null(0)
-    
-    # 7. Создаем взаимодействия признаков
-    numeric_cols = [col for col in features.columns if col not in ['user_id'] and features[col].dtype in [pl.Float64, pl.Int64]]
-    
-    for col1, col2 in combinations(numeric_cols, 2):
-        if f'{col1}_x_{col2}' not in features.columns:
-            features = features.with_columns([
-                (pl.col(col1) * pl.col(col2)).alias(f'{col1}_x_{col2}'),
-                (pl.col(col1) + pl.col(col2)).alias(f'{col1}_plus_{col2}'),
-                (pl.col(col1) / (pl.col(col2) + 1e-6)).alias(f'{col1}_div_{col2}'),
-            ])
-    
-    return features
-
-
-import polars as pl
-from datetime import timedelta
-from itertools import combinations
-from sklearn.decomposition import TruncatedSVD
-
-def validate_input_dataframes(actions_history, search_history, product_info, widget_info):
-    """
-    Проверка входных данных на наличие необходимых колонок
-    """
-    required_columns = {
-        'actions_history': ['user_id', 'action_type_id', 'product_id', 'timestamp', 'page_product_id', 'widget_name_id'],
-        'search_history': ['user_id', 'search_query', 'timestamp', 'widget_name_id'],
-        'product_info': ['product_id', 'discount_price', 'price', 'category_id', 'brand'],
-        'widget_info': ['widget_name_id', 'widget_name']
-    }
-    
-    for df_name, cols in required_columns.items():
-        df = locals()[df_name]
-        missing = [col for col in cols if col not in df.columns]
-        if missing:
-            raise ValueError(f"Missing columns in {df_name}: {missing}")
-
-def prepare_basic_data(actions_history, search_history, product_info, widget_info, end_date):
-    """
-    Подготовка базовых данных и словаря виджетов
-    """
-    widget_names = widget_info.to_pandas().set_index('widget_name_id')['widget_name'].to_dict()
-    product_info = product_info.with_columns(
-        discount_percent=(1 - pl.col('discount_price')/pl.col('price')).fill_nan(0)
-    )
-    
-    actions = actions_history.filter(pl.col('timestamp').dt.date() <= end_date)
-    searches = search_history.filter(pl.col('timestamp').dt.date() <= end_date)
-    
-    return actions, searches, product_info, widget_names
-
-def generate_action_features(actions, product_info, widget_info, widget_names, prediction_date):
-    """
-    1. Генерация признаков на основе действий пользователей
-    """
-    action_features = []
-    action_types = {
-        1: "click",
-        2: "favorite",
-        3: "order",
-        5: "to_cart"
-    }
-    
-    for action_id, action_name in action_types.items():
-        action_data = actions.filter(pl.col('action_type_id') == action_id)
-        
-        # Агрегации по товарам
-        product_aggs = (
-            action_data
-            .join(product_info, on='product_id')
-            .group_by('user_id')
-            .agg(
-                pl.count().alias(f'{action_name}_count'),
-                pl.n_unique('product_id').alias(f'{action_name}_unique_products'),
-                pl.sum('discount_price').alias(f'{action_name}_total_value'),
-                pl.mean('discount_price').alias(f'{action_name}_avg_value'),
-                (pl.lit(prediction_date) - pl.col('timestamp').dt.date()).dt.total_days().alias(f'days_since_last_{action_name}'),
-                (pl.lit(prediction_date) - pl.col('timestamp').dt.date()).dt.total_days().alias(f'days_since_first_{action_name}'),
-                pl.mean('discount_percent').alias(f'{action_name}_avg_discount'),
-                pl.max('discount_percent').alias(f'{action_name}_max_discount'),
-                *([
-                    pl.median('price').alias(f'{action_name}_median_price'),
-                    (pl.col('discount_price')/pl.col('price')).mean().alias(f'{action_name}_discount_ratio'),
-                ] if action_id == 3 else [])
-            )
-        )
-
-        # Агрегации по виджетам
-        all_users = actions.select('user_id').unique()
-        widget_counts = action_data.group_by(['user_id', 'widget_name_id']).agg(pl.count().alias('count'))
-        all_widget_ids = widget_info['widget_name_id'].unique().to_list()
-        
-        full_grid = all_users.join(pl.DataFrame({'widget_name_id': all_widget_ids}), how='cross')
-        
-        widget_aggs = (
-            full_grid
-            .join(widget_counts, on=['user_id', 'widget_name_id'], how='left')
-            .fill_null(0)
-            .pivot(index='user_id', columns='widget_name_id', values='count', aggregate_function='first')
-            .rename({
-                str(wid): f'{action_name}_widget_{widget_names.get(wid, wid)}'
-                for wid in all_widget_ids
-            })
-        )
-        
-        action_features.extend([product_aggs, widget_aggs])
-    
-    return action_features
-
-def generate_order_features(actions, product_info, prediction_date):
-    """
-    2. Генерация специальных признаков для заказов (покупок)
-    """
-    # Сначала получаем базовые агрегации
-    order_stats = (
-        actions
-        .filter(pl.col('action_type_id') == 3)
-        .join(product_info, on='product_id')
-        .group_by('user_id')
-        .agg(
-            (pl.count() - pl.n_unique('product_id')).alias('repeat_orders'),
-            pl.n_unique('category_id').alias('unique_categories'),
-            pl.n_unique('brand').alias('unique_brands'),
-            pl.col('timestamp').diff().dt.total_hours().mean().alias('avg_hours_between_orders'),
-            pl.count().alias('frequency'),
-            pl.sum('discount_price').alias('monetary')
-        )
-    )
-    
-    # Отдельно вычисляем recency (минимальное количество дней с последнего заказа)
-    recency_stats = (
-        actions
-        .filter(pl.col('action_type_id') == 3)
-        .group_by('user_id')
-        .agg(
-            (pl.lit(prediction_date) - pl.col('timestamp').dt.date()).min().dt.total_days().alias('recency')
-        )
-    )
-    
-    # Объединяем и вычисляем RFM
-    return (
-        order_stats
-        .join(recency_stats, on='user_id')
-        .with_columns(
-            (pl.col('recency') * 0.4 + pl.col('frequency') * 0.3 + pl.col('monetary') * 0.3).alias('rfm_score')
-        )
-    )
-
-def generate_search_features(searches, widget_names, prediction_date):
-    """
-    3. Generate search history features with proper error handling
-    """
-    # 1. Validate input columns
-    required_columns = {'user_id', 'timestamp', 'widget_name_id'}
-    missing_columns = required_columns - set(searches.columns)
-    if missing_columns:
-        raise ValueError(f"Missing columns in search history: {missing_columns}")
-
-    # 2. Convert prediction_date if needed
-    if not isinstance(prediction_date, (pl.Expr, pl.Date, pl.Datetime)):
-        prediction_date = pl.lit(prediction_date)
-
-    # 3. Basic search statistics
-    basic_stats = (
-        searches
-        .group_by('user_id')
-        .agg(
-            pl.count().alias('total_searches'),
-            pl.n_unique('search_query').alias('unique_searches'),
-            (prediction_date - pl.col('timestamp').max().dt.date()).cast(pl.Int64).alias('days_since_last_search')
-        )
-    )
-
-    # 4. Widget-specific features (with safe pivot)
-    try:
-        # Get unique widget IDs present in both data and mapping
-        valid_widgets = set(searches['widget_name_id'].unique()) & set(widget_names.keys())
-        
-        widget_stats = (
-            searches
-            .filter(pl.col('widget_name_id').is_in(list(valid_widgets)))
-            .group_by(['user_id', 'widget_name_id'])
-            .agg(pl.count().alias('count'))
-            .pivot(
-                index='user_id',
-                columns='widget_name_id',
-                values='count',
-                aggregate_function='sum'
-            )
-            .rename({str(k): f'search_widget_{v}' for k, v in widget_names.items() 
-                    if k in valid_widgets})
-            .fill_null(0)
-        )
-    except Exception as e:
-        print(f"Warning: Could not generate widget stats - {str(e)}")
-        widget_stats = searches.select('user_id').unique()
-
-    return basic_stats.join(widget_stats, on='user_id', how='left')
-
-def generate_interaction_features(actions, product_info):
-    """
-    4. Генерация признаков взаимодействия товаров
-    """
-    return (
-        actions
-        .filter(pl.col('page_product_id').is_not_null())
-        .join(product_info.select(['product_id', 'category_id']), on='product_id')
-        .join(
-            product_info.select(['product_id', 'category_id']).rename({'product_id': 'page_product_id', 'category_id': 'page_category_id'}),
-            on='page_product_id'
-        )
-        .group_by('user_id')
-        .agg(
-            (pl.col('category_id') == pl.col('page_category_id')).sum().alias('same_category_interactions'),
-            pl.count() / pl.n_unique('page_product_id').alias('avg_interactions_per_product'),
-        )
-    )
-
-def generate_time_features(actions, end_date):
-    """
-    5. Генерация временных признаков активности
-    """
-    return (
-        actions
-        .group_by('user_id')
-        .agg(
-            pl.col('timestamp').dt.hour().mode().first().alias('most_active_hour'),
-            pl.col('timestamp').dt.weekday().mode().first().alias('most_active_weekday'),
-            (pl.col('timestamp').dt.date() >= (end_date - timedelta(days=7))).sum().alias('actions_last_7d'),
-            (pl.col('timestamp').dt.date() >= (end_date - timedelta(days=30))).sum().alias('actions_last_30d'),
-            (pl.col('timestamp').dt.date() >= (end_date - timedelta(days=7))).sum() / 
-            (pl.col('timestamp').dt.date() >= (end_date - timedelta(days=30))).sum().alias('recent_activity_ratio')
-        )
-    )
-
-def generate_svd_features(actions):
-    """
-    6. Генерация SVD признаков из user-item матрицы
-    """
-    user_item_matrix = (
-        actions
-        .filter(pl.col('action_type_id') == 3)
-        .group_by(['user_id', 'product_id'])
-        .agg(pl.count().alias('count'))
-        .pivot(index='user_id', columns='product_id', values='count', aggregate_function='sum')
-        .fill_null(0)
-    )
-    
-    svd = TruncatedSVD(n_components=5, random_state=42)
-    svd_features = svd.fit_transform(user_item_matrix.drop('user_id').to_pandas())
-    
-    return pl.DataFrame({
-        'user_id': user_item_matrix['user_id'],
-        **{f'svd_{i+1}': svd_features[:, i] for i in range(5)}
-    })
-
-def generate_features(actions_history, search_history, product_info, widget_info, end_date, prediction_date):
-    """
-    Основная функция генерации признаков, объединяющая все подфункции
-    """
-    # Конвертация и валидация данных
-    actions_history = pl.DataFrame(actions_history)
-    search_history = pl.DataFrame(search_history)
-    product_info = pl.DataFrame(product_info)
-    widget_info = pl.DataFrame(widget_info)
-    
-    validate_input_dataframes(actions_history, search_history, product_info, widget_info)
-    
-    # Подготовка данных
-    actions, searches, product_info, widget_names = prepare_basic_data(
-        actions_history, search_history, product_info, widget_info, end_date
-    )
-    
-    # Генерация всех признаков
-    #action_features = generate_action_features(actions, product_info, widget_info, widget_names, prediction_date)
-    order_features = generate_order_features(actions, product_info, prediction_date)
-    search_features = generate_search_features(searches, widget_names, prediction_date)
-    interaction_features = generate_interaction_features(actions, product_info)
-    time_features = generate_time_features(actions, end_date)
-    #svd_features = generate_svd_features(actions)
-    
-    # Собираем все признаки вместе
-    #all_features = action_features + [order_features, interaction_features, time_features] + search_features
-
-    all_features = [order_features, interaction_features, time_features, search_features]
-
-    
-    features = all_features[0]
-    for df in all_features[1:]:
-        features = features.join(df, on='user_id', how='left')
-    
-    # Заполняем пропуски и создаем взаимодействия признаков
-    features = features.fill_null(0)
-    
-    numeric_cols = [col for col in features.columns if col not in ['user_id'] and features[col].dtype in [pl.Float64, pl.Int64]]
-    for col1, col2 in combinations(numeric_cols, 2):
-        if f'{col1}_x_{col2}' not in features.columns:
-            features = features.with_columns([
-                (pl.col(col1) * pl.col(col2)).alias(f'{col1}_x_{col2}'),
-                (pl.col(col1) + pl.col(col2)).alias(f'{col1}_plus_{col2}'),
-                (pl.col(col1) / (pl.col(col2) + 1e-6)).alias(f'{col1}_div_{col2}'),
-            ])
-    
-    return features
-
-
-
 
 #-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 #-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -1836,3 +1265,57 @@ def apply_log_transform(df, columns_to_log, drop_original=True):
             if drop_original:
                 df.drop(col, axis=1, inplace=True)
     return df
+
+
+
+def plot_combined_scores(model, X_tr, y_tr, X_val, y_val, split_col=None, support_col=None):
+    y_pred_val_raw = model.predict(X_val, raw_score=True)
+    
+    if split_col is not None:
+        split_col_series_val = X_val[split_col]
+        split_col_uniques = X_val[split_col].unique()
+    else:
+        split_col_series_val = pd.Series(np.ones(X_val.shape[0]))
+        split_col_uniques = [1]
+        
+    for val in split_col_uniques:
+        cond_val = split_col_series_val.eq(val) if not pd.isna(val) else split_col_series_val.isnull()
+
+        if support_col is not None:
+            # Создаем фигуру с двумя подграфиками
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+            
+            if split_col is not None:
+                fig.suptitle(f'{split_col}={val} | Feature: {support_col}', fontsize=16)
+            else:
+                fig.suptitle(f'Feature: {support_col}', fontsize=16)
+            
+            # Данные для графиков
+            data = X_val.assign(model_score=y_pred_val_raw).loc[cond_val]
+            hue = y_val.loc[cond_val]
+            
+            # Первый график (линейная шкала)
+            g1 = sns.JointGrid(height=6, ratio=4)
+            g1.ax_joint = ax1
+            g1.ax_marg_x = ax1.inset_axes([0, 1.05, 1, 0.25])
+            g1.ax_marg_y = ax1.inset_axes([1.05, 0, 0.25, 1])
+            sns.scatterplot(data=data, x='model_score', y=support_col, hue=hue, ax=g1.ax_joint, s=6)
+            sns.histplot(data=data, x='model_score', ax=g1.ax_marg_x, bins=30)
+            sns.histplot(data=data, y=support_col, ax=g1.ax_marg_y, bins=30)
+            sns.kdeplot(data=data, x='model_score', y=support_col, hue=hue, ax=g1.ax_joint, gridsize=30, bw_adjust=0.5)
+            ax1.set_title('Linear scale')
+            
+            # Второй график (логарифмическая шкала)
+            g2 = sns.JointGrid(height=6, ratio=4)
+            g2.ax_joint = ax2
+            g2.ax_marg_x = ax2.inset_axes([0, 1.05, 1, 0.25])
+            g2.ax_marg_y = ax2.inset_axes([1.05, 0, 0.25, 1])
+            sns.scatterplot(data=data, x='model_score', y=support_col, hue=hue, ax=g2.ax_joint, s=6)
+            sns.histplot(data=data, x='model_score', ax=g2.ax_marg_x, bins=30)
+            sns.histplot(data=data, y=support_col, ax=g2.ax_marg_y, bins=30)
+            sns.kdeplot(data=data, x='model_score', y=support_col, hue=hue, ax=g2.ax_joint, gridsize=30, bw_adjust=0.5)
+            g2.ax_joint.set_yscale('log')
+            ax2.set_title('Log scale')
+            
+            plt.tight_layout()
+            plt.show()
