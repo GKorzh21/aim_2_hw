@@ -1458,3 +1458,381 @@ def generate_features(actions_history, search_history, product_info, widget_info
             ])
     
     return features
+
+
+
+
+#-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+def get_actions_aggs(
+    actions_history, 
+    product_info, 
+    end_date, 
+    reference_date, 
+    lookback_days=30*4,
+    search_history=None
+):
+    """Генерация агрегатов по действиям пользователей с учетом кластеров поиска."""
+    actions_aggs = {}
+    actions_id_to_suf = {
+        1: "click", 
+        2: "favorite",
+        3: "order",
+        5: "to_cart",
+    }
+    
+    all_aggs = []
+    numeric_features = []
+    
+    # Получаем основной кластер поиска для каждого пользователя (если есть search_history)
+    main_search_cluster = None
+    if search_history is not None:
+        main_search_cluster = (
+            search_history
+            .filter(pl.col('timestamp').dt.date() <= end_date)
+            .filter(pl.col('timestamp').dt.date() >= end_date - timedelta(days=lookback_days))
+            .group_by('user_id')
+            .agg(pl.col('cluster').mode().first().alias('main_search_cluster'))
+        )
+    
+    for id_, suf in actions_id_to_suf.items():
+        # Базовые агрегаты за весь период (lookback_days)
+        base_query = (
+            actions_history
+            .filter(pl.col('timestamp').dt.date() <= end_date)
+            .filter(pl.col('timestamp').dt.date() >= end_date - timedelta(days=lookback_days))
+            .filter(pl.col('action_type_id') == id_)
+            .join(
+                product_info.select('product_id', 'discount_price', 'cluster'),
+                on='product_id',
+            )
+        )
+        
+        # Если есть данные о поисках, добавляем информацию о основном кластере поиска
+        if main_search_cluster is not None:
+            base_query = base_query.join(main_search_cluster, on='user_id', how='left')
+        
+        aggs = (
+            base_query
+            .group_by('user_id')
+            .agg(
+                # Базовые агрегаты
+                pl.count('product_id').cast(pl.Int32).alias(f'num_products_{suf}'),
+                pl.sum('discount_price').cast(pl.Float32).alias(f'sum_discount_price_{suf}'),
+                pl.max('discount_price').cast(pl.Float32).alias(f'max_discount_price_{suf}'),
+                pl.max('timestamp').alias(f'last_{suf}_time'),
+                pl.min('timestamp').alias(f'first_{suf}_time'),
+                pl.col('cluster').n_unique().alias(f'num_{suf}_clusters'),
+                pl.col('cluster').mode().first().alias(f'main_{suf}_cluster'),
+                (pl.col('cluster').value_counts().struct.field('count').max() / pl.count()).alias(f'{suf}_cluster_concentration'),
+                
+                # Новые агрегаты по кластерам (если есть данные о поисках)
+                *([
+                    # Доля действий в основном кластере поиска
+                    (pl.col('cluster').filter(pl.col('cluster') == pl.col('main_search_cluster')).count() / 
+                    pl.count().alias(f'{suf}_in_main_search_cluster_ratio')),
+                    
+                    # Количество кластеров действий, которые совпадают с кластерами поиска
+                    pl.col('cluster').filter(
+                        pl.col('cluster').is_in(
+                            search_history.filter(pl.col('user_id') == pl.col('user_id')).select('cluster')
+                    ).n_unique().alias(f'num_{suf}_clusters_matching_search')),
+                    
+                    # Средняя цена в основном кластере поиска vs других кластерах
+                    (pl.col('discount_price').filter(pl.col('cluster') == pl.col('main_search_cluster')).mean() - 
+                     pl.col('discount_price').filter(pl.col('cluster') != pl.col('main_search_cluster')).mean()
+                    ).alias(f'{suf}_price_diff_main_search_cluster'),
+                    
+                    # Время между поиском и действием в том же кластере (только для действий после поиска)
+                    ((pl.col('timestamp') - 
+                      search_history.filter(
+                          (pl.col('user_id') == pl.col('user_id')) & 
+                          (pl.col('cluster') == pl.col('cluster'))
+                      ).select(pl.col('timestamp').min())
+                     ).dt.total_days().mean().alias(f'mean_days_between_search_and_{suf}_same_cluster'))
+                ] if main_search_cluster is not None else []
+                )
+            )
+            .with_columns([
+                (pl.lit(reference_date) - pl.col(f'last_{suf}_time'))
+                .dt.total_days()
+                .cast(pl.Int32)
+                .alias(f'days_since_last_{suf}'),
+                
+                (pl.lit(reference_date) - pl.col(f'first_{suf}_time'))
+                .dt.total_days()
+                .cast(pl.Int32)
+                .alias(f'days_since_first_{suf}'),
+            ])
+        )
+        
+        # Добавляем агрегаты за разные временные окна для кликов и заказов
+        if id_ == 1:  # clicks
+            for i, days in enumerate([30, 60, 90], 1):
+                window_aggs = (
+                    actions_history
+                    .filter(pl.col('timestamp').dt.date() <= end_date)
+                    .filter(pl.col('timestamp').dt.date() >= end_date - timedelta(days=days))
+                    .filter(pl.col('action_type_id') == id_)
+                    .group_by('user_id')
+                    .agg(
+                        pl.count('product_id').cast(pl.Int32).alias(f'num_products_{suf}_last_{i}_month'),
+                    )
+                )
+                aggs = aggs.join(window_aggs, on='user_id', how='left')
+                numeric_features.append(f'num_products_{suf}_last_{i}_month')
+                
+        elif id_ == 3:  # orders
+            for i, days in enumerate([30, 60, 90], 1):
+                window_aggs = (
+                    actions_history
+                    .filter(pl.col('timestamp').dt.date() <= end_date)
+                    .filter(pl.col('timestamp').dt.date() >= end_date - timedelta(days=days))
+                    .filter(pl.col('action_type_id') == id_)
+                    .join(
+                        product_info.select('product_id', 'discount_price'),
+                        on='product_id',
+                    )
+                    .group_by('user_id')
+                    .agg(
+                        pl.sum('discount_price').cast(pl.Float32).alias(f'sum_discount_price_{suf}_last_{i}_month'),
+                    )
+                )
+                aggs = aggs.join(window_aggs, on='user_id', how='left')
+                numeric_features.append(f'sum_discount_price_{suf}_last_{i}_month')
+        
+        # Добавляем фичи в список числовых фич
+        base_features = [
+            f'num_products_{suf}',
+            f'sum_discount_price_{suf}', 
+            f'max_discount_price_{suf}',
+            f'days_since_last_{suf}',
+            f'days_since_first_{suf}',
+            f'num_{suf}_clusters',
+            f'main_{suf}_cluster',
+            f'{suf}_cluster_concentration',
+        ]
+        
+        if main_search_cluster is not None:
+            base_features.extend([
+                f'{suf}_in_main_search_cluster_ratio',
+                f'num_{suf}_clusters_matching_search',
+                f'{suf}_price_diff_main_search_cluster',
+                f'mean_days_between_search_and_{suf}_same_cluster',
+            ])
+        
+        numeric_features.extend(base_features)
+        
+        actions_aggs[id_] = aggs
+        all_aggs.append(aggs)
+
+        print(f"actions {id_} {suf} finished")
+    
+    # Объединяем все агрегации
+    combined = all_aggs[0]
+    for i, agg in enumerate(all_aggs[1:], 1):
+        combined = combined.join(agg, on='user_id', how='left', suffix=f"_{i}")
+    
+    return actions_aggs, combined, numeric_features
+
+
+def get_search_aggs(search_history, end_date, reference_date, lookback_days=30*5):
+    """Генерация агрегатов по поисковым запросам."""
+    id_ = 4
+    suf = 'search'
+    
+    # Топ-3 кластеров
+    cluster_counts = (
+        search_history
+        .filter(pl.col('action_type_id') == id_)
+        .filter(pl.col('timestamp').dt.date() <= end_date)
+        .filter(pl.col('timestamp').dt.date() >= end_date - timedelta(days=lookback_days))
+        .group_by('user_id')
+        .agg(
+            pl.col('cluster').value_counts().alias('cluster_counts')
+        )
+        .explode('cluster_counts')
+        .with_columns(
+            pl.col('cluster_counts').struct.field('cluster').alias('cluster_name'),
+            pl.col('cluster_counts').struct.field('count').alias('cluster_count')
+        )
+        .group_by('user_id')
+        .agg(
+            pl.col('cluster_name').sort_by('cluster_count', descending=True).head(3).alias('top3_clusters'),
+            pl.col('cluster_count').sort(descending=True).head(3).alias('top3_counts')
+        )
+    )
+    
+    # Агрегаты по поискам
+    search_aggs = (
+        search_history
+        .filter(pl.col('action_type_id') == id_)
+        .filter(pl.col('timestamp').dt.date() <= end_date)
+        .filter(pl.col('timestamp').dt.date() >= end_date - timedelta(days=lookback_days))
+        .group_by('user_id')
+        .agg(
+            pl.count('search_query').cast(pl.Int32).alias(f'num_{suf}'),
+            pl.col('search_query').n_unique().alias(f'unique_{suf}_queries'),
+            
+            pl.col('search_query')
+                .filter(pl.col('timestamp').dt.date() >= end_date - timedelta(days=30))
+                .count()
+                .cast(pl.Int32)
+                .alias(f'num_{suf}_last_month'),
+            
+            pl.col('search_query')
+                .filter(pl.col('timestamp').dt.date() >= end_date - timedelta(days=7))
+                .count()
+                .cast(pl.Int32)
+                .alias(f'num_{suf}_last_week'),
+
+            (pl.count() / (pl.max('timestamp') - pl.min('timestamp')).dt.total_days()).alias(f'{suf}_daily_rate'),
+
+            pl.col('cluster').n_unique().alias(f'num_{suf}_clusters'),
+            pl.col('cluster').mode().first().alias(f'main_{suf}_cluster'),
+            
+            pl.col('cluster')
+                .filter(pl.col('timestamp').dt.date() >= end_date - timedelta(days=30))
+                .mode().first()
+                .alias(f'recent_{suf}_cluster'),
+
+            (pl.col('cluster').value_counts().struct.field('count').max() / pl.col('cluster').count()).alias(f'{suf}_cluster_concentration'),
+            
+            (-(pl.col('cluster').value_counts().struct.field('count') / pl.col('cluster').count()).log()
+                * (pl.col('cluster').value_counts().struct.field('count') / pl.col('cluster').count())
+                .sum()).alias(f'{suf}_cluster_entropy'),
+            
+            pl.col('cluster').diff().fill_null(0).abs().sum().alias(f'{suf}_cluster_switches'),
+            
+            ((pl.col('cluster').count() - pl.col('cluster').n_unique()) / pl.col('cluster').count())
+                .alias(f'{suf}_cluster_stability'),
+            
+            (pl.col('timestamp')
+                .filter(pl.col('cluster') == pl.col('cluster').mode().first())
+                .count() / pl.col('timestamp').count())
+                .alias(f'main_{suf}_cluster_time_ratio'),
+
+            pl.col('timestamp').filter(pl.col('cluster').diff().fill_null(0) != 0)
+                .diff()
+                .dt.total_days()
+                .mean()
+                .alias(f'{suf}_mean_cluster_switch_days'),
+
+            pl.col('search_query').str.len_chars().mean().alias(f'{suf}_mean_query_len'),
+            
+            (pl.col('search_query').str.len_chars()
+                .filter(pl.col('cluster') == pl.col('cluster').mode().first()).mean() - 
+                pl.col('search_query').str.len_chars()
+                    .filter(pl.col('cluster') != pl.col('cluster').mode().first()).mean())
+                    .alias(f'{suf}_main_cluster_query_len_diff'),
+
+            pl.max('timestamp').alias(f'last_{suf}_time'),
+            pl.min('timestamp').alias(f'first_{suf}_time'),
+        )
+        .join(cluster_counts, on='user_id', how='left')
+        .with_columns([
+            (pl.lit(reference_date) - pl.col(f'last_{suf}_time'))
+                .dt.total_days()
+                .cast(pl.Int32)
+                .alias(f'days_since_last_{suf}'),
+
+            (pl.lit(reference_date) - pl.col(f'first_{suf}_time'))
+                .dt.total_days()
+                .cast(pl.Int32)
+                .alias(f'days_since_first_{suf}'),
+        ])
+        .select(
+            'user_id',
+            f'num_{suf}',
+            f'unique_{suf}_queries',
+            f'num_{suf}_last_month',
+            f'num_{suf}_last_week',
+            f'{suf}_daily_rate',
+            f'num_{suf}_clusters',
+            f'main_{suf}_cluster',
+            pl.col('top3_clusters').alias(f'top3_{suf}_clusters'),
+            pl.col('top3_counts').alias(f'top3_{suf}_counts'),
+            f'recent_{suf}_cluster',
+            f'{suf}_cluster_concentration',
+            f'{suf}_cluster_entropy',
+            f'{suf}_cluster_switches',
+            f'{suf}_cluster_stability',
+            f'main_{suf}_cluster_time_ratio',
+            f'{suf}_mean_cluster_switch_days',
+            f'{suf}_mean_query_len',
+            f'{suf}_main_cluster_query_len_diff',
+            f'days_since_last_{suf}',
+            f'days_since_first_{suf}',
+            f'last_{suf}_time',
+            f'first_{suf}_time',
+        )
+    )
+    
+    return {id_: search_aggs}
+
+def build_features(base_df, actions_aggs, search_aggs):
+    """Построение финального датафрейма с признаками."""
+    df_main = base_df
+    for _, actions_aggs_df in actions_aggs.items():
+        df_main = df_main.join(actions_aggs_df, on='user_id', how='left')
+    
+    for _, search_aggs_df in search_aggs.items():
+        df_main = df_main.join(search_aggs_df, on='user_id', how='left')
+    
+    return df_main
+
+
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+def plot_feature_distributions(dataset, feature_columns):
+    """
+    Строит распределение для каждого признака из списка.
+    
+    Параметры:
+    ----------
+    dataset : pandas.DataFrame
+        Датасет с данными
+    feature_columns : list
+        Список столбцов, для которых нужно построить распределение
+    """
+    for col in feature_columns:
+        plt.figure(figsize=(8, 6))
+        sns.histplot(dataset[col], bins=20, kde=True)
+        plt.title(f'Распределение {col}')
+        plt.xlabel(f'{col}')
+        plt.ylabel('Частота')
+        plt.show()
+
+
+import numpy as np
+import pandas as pd
+
+
+def apply_log_transform(df, columns_to_log, drop_original=True):
+    df = df.copy()
+    for col in columns_to_log:
+        if col in df.columns:
+            new_col = f'log_{col}'
+            # Защита от 0 и отрицательных значений
+            df[new_col] = np.log(df[col].replace(0, 1e-10).clip(lower=1e-10))
+            df[new_col] = df[new_col].replace([np.inf, -np.inf], np.nan).astype('float32')
+            if drop_original:
+                df.drop(col, axis=1, inplace=True)
+    return df
