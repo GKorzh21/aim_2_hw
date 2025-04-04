@@ -157,6 +157,37 @@ def plot_lgbm_importance(model, features, importance_type='split', top_k=20, skl
     plt.xlabel(importance_type, fontsize=15)
     sns.despine()
 
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+def plot_catboost_importance(model, features, importance_type='PredictionValuesChange', top_k=20, sklearn_style=False, imps=None, round_to=0):
+    # Получаем важности признаков
+    if sklearn_style and imps is None:
+        imps = model.feature_importances_
+    elif imps is None:
+        imps = model.get_feature_importance(type=importance_type)
+    
+    # Сортируем признаки по важности
+    idx = np.argsort(imps)
+    sorted_imps = imps[idx][::-1][:top_k][::-1]
+    sorted_features = np.array(features)[idx][::-1][:top_k][::-1]
+    
+    # Округляем значения
+    if round_to == 0:
+        sorted_imps = sorted_imps.astype(int)
+    else:
+        sorted_imps = np.round(sorted_imps, round_to)
+    
+    # Строим горизонтальный барплот
+    bar_container = plt.barh(width=sorted_imps, y=sorted_features)
+    plt.bar_label(bar_container, sorted_imps, color='red')
+    plt.gcf().set_size_inches(5, top_k/6 + 1)
+    plt.xlabel(importance_type, fontsize=15)
+    sns.despine()
+    plt.title('CatBoost Feature Importance', fontsize=15)
+
+
 
 def get_shadow_features(tr, val, n_float=5, n_cat_big=5, n_cat_small=5):
     col_names = [f'shadow_float_{i+1}' for i in range(5)]
@@ -269,6 +300,68 @@ def train_model(tr, val, features, target_col, params=None, shadow_features=Fals
         return model, tr_shadow.columns, X_tr, X_val
     return model
 
+from catboost import CatBoostClassifier, Pool
+
+
+def train_catboost_model(tr, val, features, target_col, params=None, shadow_features=False, sklearn_style=False):
+    """
+    Аналог вашей функции train_model, но для CatBoost
+    
+    Параметры:
+    tr, val - тренировочный и валидационный датафреймы
+    features - список фичей для использования
+    target_col - название целевой колонки
+    params - словарь параметров CatBoost
+    shadow_features - добавлять ли шумовые фичи
+    sklearn_style - использовать sklearn-интерфейс (True) или native-интерфейс (False)
+    """
+    tr_shadow, val_shadow = pd.DataFrame(), pd.DataFrame()
+    if shadow_features:
+        tr_shadow, val_shadow = get_shadow_features(tr, val)
+
+    X_tr = pd.concat([tr[features], tr_shadow], axis=1, sort=False)
+    X_val = pd.concat([val[features], val_shadow], axis=1, sort=False)
+    y_tr = tr[target_col]
+    y_val = val[target_col]
+    
+    # Определяем категориальные фичи (если есть)
+    cat_features = X_tr.select_dtypes(include=['object', 'category']).columns.tolist()
+    
+    params_ = {
+        'loss_function': 'Logloss',
+        'eval_metric': 'AUC',
+        'learning_rate': 0.01,
+        'iterations': 1000,
+        'early_stopping_rounds': 100,
+        'verbose': 100,
+        'random_seed': 42,
+        'thread_count': -1
+    }
+    if params is not None:
+        params_.update(params)
+
+    if not sklearn_style:
+        # Native CatBoost интерфейс (аналог lgb.train)
+        train_pool = Pool(X_tr, y_tr, cat_features=cat_features)
+        val_pool = Pool(X_val, y_val, cat_features=cat_features)
+        
+        model = CatBoostClassifier(**params_)
+        model.fit(train_pool, eval_set=val_pool, use_best_model=True)
+    else:
+        # Sklearn-интерфейс (аналог LGBMClassifier)
+        model = CatBoostClassifier(**params_)
+        model.fit(
+            X_tr, y_tr,
+            eval_set=(X_val, y_val),
+            cat_features=cat_features,
+            use_best_model=True,
+            verbose=100
+        )
+    
+    if shadow_features:
+        return model, tr_shadow.columns, X_tr, X_val
+    return model
+
 
 def get_different_scores(tr, val, features, target_col):
     model_lgb = train_model(tr, val, features, target_col)
@@ -352,11 +445,26 @@ def plot_scores(model, X_tr, y_tr, X_val, y_val, split_col=None, support_col=Non
     plt.show()
 
 
-def get_split(df, val_size=0.33):
+def get_split(df, val_size=0.33, random_state = 42):
+    np.random.seed(random_state)
+
     train_idx = np.random.choice(df.index, size=int(df.shape[0]*(1-val_size)), replace=False)
     val_idx = np.setdiff1d(df.index, train_idx)
     return df.loc[train_idx].reset_index(drop=True), df.loc[val_idx].reset_index(drop=True)
 
+def get_shuffle_split(df, val_size=0.33, random_state=42):
+    np.random.seed(random_state)
+    
+    # Создаем массив индексов и перемешиваем их
+    idx = df.index.values
+    np.random.shuffle(idx)
+    
+    # Разделяем на train и validation
+    split_point = int(len(idx) * (1 - val_size))
+    train_idx = idx[:split_point]
+    val_idx = idx[split_point:]
+    
+    return df.loc[train_idx].reset_index(drop=True), df.loc[val_idx].reset_index(drop=True)
 
 def get_df_info(df, cols=None):
     if cols is None:
@@ -830,6 +938,7 @@ import numpy as np
 import pandas as pd
 import faiss
 from sklearn.preprocessing import StandardScaler
+from scipy import stats
 
 def add_knn_features_faiss(df_pd, features, n_neighbors=5, use_gpu=True):
     df = df_pd.copy()
@@ -873,9 +982,43 @@ def add_knn_features_faiss(df_pd, features, n_neighbors=5, use_gpu=True):
     df['knn_distance_min'] = distances.min(axis=1)
     df['knn_distance_std'] = distances.std(axis=1)
     df['knn_distance_range'] = df['knn_distance_max'] - df['knn_distance_min']
+    df['knn_local_density'] = 1 / (df['knn_distance_mean'] + 1e-6)  # Локальная плотность
+
+
+
+    if 'days_since_first_order' in features and 'days_since_last_order' in features:
+        df['knn_recency_ratio'] = df['days_since_last_order'] / (df['days_since_first_order'] + 1)
+        knn_features['knn_activity_decay'] = df['days_since_last_order'].values - df['days_since_last_order'].values[indices].mean(axis=1)
     
+    # 3. Признаки на основе корзины и активности
+    if 'sum_discount_price_to_cart' in features and 'num_products_click' in features:
+        knn_features['knn_price_per_product'] = df['sum_discount_price_to_cart'] / (df['num_products_click'] + 1e-6)
+    
+    if 'cart_add_ratio_30d' in features:
+        knn_features['knn_cart_consistency'] = df['cart_add_ratio_30d'] / (df['cart_add_ratio_30d'].values[indices].mean(axis=1) + 1e-6)
+    
+    # 4. Признаки кластеризации
+    if 'main_search_cluster' in features:
+        # Мода кластера среди соседей
+        knn_cluster_mode = stats.mode(df['main_search_cluster'].values[indices], axis=1)[0].ravel()
+        df['knn_cluster_outlier'] = (df['main_search_cluster'] != knn_cluster_mode).astype(int)
+    
+    if 'search_cluster_stability' in features and 'product_cluster_stability' in features:
+        knn_features['knn_cluster_stability_diff'] = df['product_cluster_stability'] - df['search_cluster_stability']
+    
+    # 5. Признаки активности
+    if 'active_days_30d' in features:
+        df['knn_activity_consistency'] = df['active_days_30d'] / 30
+    
+    if 'unique_clusters_30d' in features:
+        knn_features['knn_cluster_exploration'] = df['unique_clusters_30d'] / (df['unique_clusters_30d'].values[indices].mean(axis=1) + 1e-6)
+    
+    # 6. Взвешенные признаки (с учетом расстояния до соседей)
+    weights = 1 / (distances + 1e-6)
     for feature in features:
         knn_values = df[feature].values[indices]
+        
+        # Обычные статистики
         knn_features[f'knn_{feature}_mean'] = knn_values.mean(axis=1)
         knn_features[f'knn_{feature}_max'] = knn_values.max(axis=1)
         knn_features[f'knn_{feature}_min'] = knn_values.min(axis=1)
@@ -883,6 +1026,22 @@ def add_knn_features_faiss(df_pd, features, n_neighbors=5, use_gpu=True):
         knn_features[f'knn_{feature}_median'] = np.median(knn_values, axis=1)
         knn_features[f'knn_{feature}_sum'] = knn_values.sum(axis=1)
         knn_features[f'knn_{feature}_range'] = knn_features[f'knn_{feature}_max'] - knn_features[f'knn_{feature}_min']
+        
+        # Взвешенные статистики
+        weighted_mean = np.sum(weights * knn_values, axis=1) / np.sum(weights, axis=1)
+        knn_features[f'knn_{feature}_weighted_mean'] = weighted_mean
+    
+    # 7. Комбинированные признаки (кросс-фичи)
+    if 'sum_discount_price_to_cart' in features and 'active_days_30d' in features:
+        high_value_mask = (df['sum_discount_price_to_cart'] > knn_features['knn_sum_discount_price_to_cart_mean']) & \
+                         (df['active_days_30d'] > knn_features['knn_active_days_30d_mean'])
+        df['knn_high_value_activity'] = high_value_mask.astype(int)
+    
+    if 'product_cluster_stability' in features and 'active_days_30d' in features:
+        stable_inactive_mask = (df['product_cluster_stability'] > knn_features['knn_product_cluster_stability_mean']) & \
+                              (df['active_days_30d'] < knn_features['knn_active_days_30d_mean'])
+        df['knn_stable_but_inactive'] = stable_inactive_mask.astype(int)
+
     
     # Добавляем новые признаки в DataFrame
     for key, value in knn_features.items():
@@ -1319,3 +1478,102 @@ def plot_combined_scores(model, X_tr, y_tr, X_val, y_val, split_col=None, suppor
             
             plt.tight_layout()
             plt.show()
+
+import pandas as pd
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+
+def add_pca_columns( df: pd.DataFrame,  columns: list,  n_components: int = None, prefix: str = 'pca_', scale: bool = True):
+    data = df[columns].copy()
+
+    data[columns] = data[columns].replace([np.inf, -np.inf], np.nan)
+
+    zero_fill_cols = [col for col in columns if col.startswith(('num_', 'sum_', 'max_', 'days_', 'log_', 'avg_', 'main_', 'search_', 'product_', 'recent_'))]
+    zero_fill_cols_end = [col for col in columns if col.endswith(('_30d'))]
+    time_fill_cols = [col for col in columns if col.endswith('_time')]
+    
+    data[zero_fill_cols] = data[zero_fill_cols].fillna(0)
+    data[zero_fill_cols_end] = data[zero_fill_cols_end].fillna(0)
+    data[time_fill_cols] = data[time_fill_cols].fillna(pd.Timestamp('2024-01-01 00:00:00'))
+    print('Nans filled')
+    
+    if scale:
+        scaler = StandardScaler()
+        data = scaler.fit_transform(data)
+    
+    pca = PCA(n_components=n_components)
+    pca_components = pca.fit_transform(data)
+    
+    pca_columns = [f"{prefix}{i+1}" for i in range(pca_components.shape[1])]
+    
+    for i, col in enumerate(pca_columns):
+        df[col] = pca_components[:, i]
+    
+    return df
+
+from sklearn.model_selection import train_test_split
+
+from sklearn.model_selection import train_test_split
+import numpy as np
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import make_pipeline
+import numpy as np
+
+def add_logreg_column(df, columns, target='target'):
+    # Копируем данные, включая target
+    data = df[columns + [target]].copy()
+
+    # Заменяем inf на nan
+    data[columns] = data[columns].replace([np.inf, -np.inf], np.nan)
+
+    # Заполняем пропуски
+    zero_fill_cols = [col for col in columns if col.startswith(('num_', 'sum_', 'max_', 'days_', 'log_', 'avg_', 'main_', 'search_', 'product_', 'recent_', 'knn'))]
+    zero_fill_cols_end = [col for col in columns if col.endswith(('_30d'))]
+    time_fill_cols = [col for col in columns if col.endswith('_time')]
+    
+    data[zero_fill_cols] = data[zero_fill_cols].fillna(0)
+    data[zero_fill_cols_end] = data[zero_fill_cols_end].fillna(0)
+    data[time_fill_cols] = data[time_fill_cols].fillna(pd.Timestamp('2024-01-01 00:00:00'))
+
+    # Проверяем, есть ли оставшиеся NaN
+    nan_cols = data[columns].columns[data[columns].isna().any()].tolist()
+    if nan_cols:
+        print(f"Заполняем оставшиеся NaN в колонках: {nan_cols}")
+        for col in nan_cols:
+            if data[col].dtype.kind in 'biufc':  # Числовые колонки
+                data[col] = data[col].fillna(data[col].median())
+            else:  # Категориальные или временные
+                data[col] = data[col].fillna(data[col].mode()[0])
+
+    # Разделяем данные
+    X = data[columns]
+    y = data[target]
+    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.3, random_state=40)
+
+    # Создаем пайплайн: масштабирование + логистическая регрессия
+    pipeline = make_pipeline(
+        StandardScaler(),  # Масштабируем признаки
+        LogisticRegression(
+            C=0.1,
+            max_iter=1000,
+            random_state=42,
+            class_weight='balanced'  # Учитываем дисбаланс классов
+        )
+    )
+
+    # Обучаем модель
+    pipeline.fit(X_train, y_train)
+
+    # Получаем предсказания (вероятности класса 1)
+    logreg_pred = pipeline.predict_proba(data[columns])[:, 1]
+
+    # Проверяем, что предсказания не все 0.5
+    if np.allclose(logreg_pred, 0.5, atol=0.01):
+        print("⚠️ Внимание: модель предсказывает только 0.5. Проверьте данные!")
+        print(f"Распределение target: {data[target].value_counts(normalize=True)}")
+        print(f"NaN в данных: {data[columns].isna().sum().sum()}")
+
+    return logreg_pred
