@@ -533,6 +533,7 @@ def get_shuffle_split(df, val_size=0.33, random_state=42):
     
     return df.loc[train_idx].reset_index(drop=True), df.loc[val_idx].reset_index(drop=True)
 
+#dataframe analyse
 def get_df_info(df, cols=None):
     if cols is None:
         cols = df.columns
