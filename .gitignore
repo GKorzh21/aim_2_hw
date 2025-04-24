@@ -1,0 +1,3 @@
+*.parquet
+
+**/ml2_hw2_subs/
