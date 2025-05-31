@@ -1,0 +1,7 @@
+*.parquet
+
+**/ml2_hw2_subs/
+
+ML2/hw2/subs/*.csv
+ML2/hw2/*.csv
+./kaggle/Predict Podcast Listening Time/data/*.csv
