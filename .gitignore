@@ -6,3 +6,4 @@ ML2/hw2/subs/*.csv
 ML2/hw2/*.csv
 ./kaggle/Predict Podcast Listening Time/data/*.csv
 DL_summer/data/
+aim_2_hw/DL_summer/data
