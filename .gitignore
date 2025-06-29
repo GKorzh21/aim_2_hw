@@ -8,5 +8,5 @@ ML2/hw2/*.csv
 DL_summer/data/
 aim_2_hw/DL_summer/data
 
-Alfa_Summer_Challenge\cheating\*.pa
-Alfa_Summer_Challenge\data\*.pa
+Alfa_Summer_Challenge/cheating
+Alfa_Summer_Challenge/data
