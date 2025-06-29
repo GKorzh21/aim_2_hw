@@ -7,3 +7,6 @@ ML2/hw2/*.csv
 ./kaggle/Predict Podcast Listening Time/data/*.csv
 DL_summer/data/
 aim_2_hw/DL_summer/data
+
+Alfa_Summer_Challenge\cheating\*.pa
+Alfa_Summer_Challenge\data\*.pa
